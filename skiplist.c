@@ -55,8 +55,7 @@ skiplist *skiplistNewWithCustomAlloc(size_t element_size, skiplistCmpFn cmp, ski
 }
 
 void skiplistDrop(skiplist *sk) {
-    // TODO: drop internal allocated objects
-    node *x = sk->head->forward[0];
+    node *x = sk->head;
     while (x) {
         node *t = x->forward[0];
         nodeDrop(x);
@@ -151,10 +150,10 @@ static int pairCmp(const void *a, const void *b) {
 
 int main(int argc, char **argv) {
     skiplist *sk = skiplistNew(sizeof(pair), &pairCmp);
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 1; i++) {
         skiplistInsert(sk, &(pair){.key = i, .val = i});
     }
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 1; i++) {
         pair *item = skiplistGet(sk, &(pair){.key = i});
         assert(item != NULL);
         assert(item->key == i);
