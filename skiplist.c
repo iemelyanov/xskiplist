@@ -48,7 +48,8 @@ struct skiplist *skiplist_new(size_t element_size, skiplist_cmp_fn cmp)
 	return sk;
 }
 
-struct skiplist *skiplist_new_with_custom_alloc(size_t element_size, skiplist_cmp_fn cmp, skiplist_malloc_fn malloc, skiplist_realloc_fn realloc, skiplist_free_fn free)
+struct skiplist *skiplist_new_with_custom_alloc(size_t element_size, skiplist_cmp_fn cmp, skiplist_malloc_fn malloc,
+	skiplist_realloc_fn realloc, skiplist_free_fn free)
 {
 	xmalloc = malloc;
 	xrealloc = realloc;
