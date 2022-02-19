@@ -137,7 +137,8 @@ void *skiplist_del(struct skiplist *l, void *key)
 	return NULL;
 }
 
-size_t skiplist_len(struct skiplist *l) {
+size_t skiplist_len(struct skiplist *l)
+{
 	return l->len;
 }
 
@@ -148,13 +149,15 @@ struct pair {
 	int val;
 };
 
-static int pair_cmp(const void *a, const void *b) {
+static int pair_cmp(const void *a, const void *b)
+{
 	const struct pair *pa = a;
 	const struct pair *pb = b;
 	return pa->key - pb->key;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
 	struct skiplist *sk = skiplist_new(sizeof(struct pair), &pair_cmp);
 	assert(skiplist_len(sk) == 0);
 	for (int i = 0; i < 10; i++) {
