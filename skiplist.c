@@ -7,7 +7,7 @@ void *(*xcalloc)(size_t, size_t) = calloc;
 void (*xfree)(void *) = free;
 
 #define MAX_LEVEL (24)
-#define SMALL_ELEMENT_SIZE (32)
+#define SMALL_ELEMENT_SIZE (16)
 
 struct skiplistNode {
     skiplistNode *forward[MAX_LEVEL];
