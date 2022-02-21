@@ -5,28 +5,29 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct skiplist;
-struct skiplist_node;
+typedef struct skiplist skiplist;
+typedef struct skiplistNode skiplistNode;
 
-struct skiplist_iter {
-	const struct skiplist *sk;
-	struct skiplist_node *next;
-};
+typedef struct {
+    const skiplist *sk;
+    skiplistNode *next;
+    size_t element_size;
+} skiplistIter;
 
-typedef int (*skiplist_cmp_fn)(const void *a, const void *b);
-typedef void *(*skiplist_calloc_fn)(size_t nmemb, size_t size);
-typedef void (*skiplist_free_fn)(void *);
+typedef int (*skiplistCmpFn)(const void *a, const void *b);
+typedef void *(*skiplistCallocFn)(size_t nmemb, size_t size);
+typedef void (*skiplistFreeFn)(void *);
 
-struct skiplist *skiplist_new(size_t element_size, skiplist_cmp_fn cmp);
-struct skiplist *skiplist_new_with_custom_alloc(size_t element_size, skiplist_cmp_fn cmp, skiplist_calloc_fn calloc, skiplist_free_fn free);
+struct skiplist *skiplistNew(size_t element_size, skiplistCmpFn cmp);
+struct skiplist *skiplistNewWithCustomAlloc(size_t element_size, skiplistCmpFn cmp, skiplistCallocFn calloc, skiplistFreeFn free);
 
-void skiplist_drop(struct skiplist *sk);
-void skiplist_insert(struct skiplist *sk, void *element);
-void *skiplist_get(struct skiplist *sk, void *key);
-void *skiplist_del(struct skiplist *sk, void *key);
-size_t skiplist_len(struct skiplist *sk);
+void skiplistDrop(skiplist *sk);
+void skiplistInsert(skiplist *sk, void *element);
+void *skiplistGet(skiplist *sk, void *key);
+void skiplistDel(skiplist *sk, void *key);
+size_t skiplistLen(skiplist *sk);
 
-void skiplist_iter_init(struct skiplist_iter *it, const struct skiplist *sk);
-bool skiplist_iter_next(struct skiplist_iter *it, void **item);
+void skiplistIterInit(skiplistIter *it, const struct skiplist *sk);
+bool skiplistIterNext(skiplistIter *it, void **item);
 
 #endif
