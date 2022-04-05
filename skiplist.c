@@ -8,271 +8,287 @@ void (*xfree)(void *) = free;
 
 #define MAX_LEVEL (20)
 
-struct skiplistNode {
-    int element_size;
-    char data[0];
+struct skiplist_node {
+	int element_size;
+	char data[0];
 };
 
-#define nodeElementPtr(n) ((void*)(&(n)->data[0]))
-#define nodeForwards(n) ((skiplistNode**)(&(n)->data[(n)->element_size]))
+#define node_element_ptr(n) ((void*)(&(n)->data[0]))
+#define node_forwards(n) ((struct skiplist_node**)(&(n)->data[(n)->element_size]))
 
 struct skiplist {
-    size_t element_size;
-    size_t len;
-    size_t level;
-    skiplistCmpFn cmp;
-    skiplistNode *head;
-    uint32_t seed;
+	size_t element_size;
+	size_t len;
+	size_t level;
+	skiplist_cmp_fn cmp;
+	struct skiplist_node *head;
+	uint32_t seed;
 };
 
-static skiplistNode *nodeNew(size_t element_size, size_t height) {
-    skiplistNode *node = xcalloc(1, sizeof(skiplistNode) + element_size + sizeof(skiplistNode*) * height);
-    node->element_size = element_size;
-    return node;
+static struct skiplist_node *node_new(size_t element_size, size_t height)
+{
+	size_t size = sizeof(struct skiplist_node) + element_size + sizeof(struct skiplist_node*) * height;
+	struct skiplist_node *node = xcalloc(1, size);
+	node->element_size = element_size;
+	return node;
 }
 
-static void nodeInitElement(skiplist *sk, skiplistNode *node, void *element) {
-    memcpy(nodeElementPtr(node), element, sk->element_size);
+static void node_init_element(struct skiplist *sk, struct skiplist_node *node, void *element)
+{
+	memcpy(node_element_ptr(node), element, sk->element_size);
 }
 
-static void nodeDrop(skiplist *sk, skiplistNode *node) {
-    xfree(node);
+static void node_drop(struct skiplist *sk, struct skiplist_node *node)
+{
+	xfree(node);
 }
 
-skiplist *skiplistNew(size_t element_size, skiplistCmpFn cmp) {
-    skiplist *sk = xcalloc(1, sizeof(*sk));
-    sk->element_size = element_size;
-    sk->len = 0;
-    sk->level = 1;
-    sk->cmp = cmp;
-    sk->head = nodeNew(element_size, MAX_LEVEL);
-    sk->seed = 0xdeadbeef & 0x7fffffffu;
-    return sk;
+struct skiplist *skiplist_new(size_t element_size, skiplist_cmp_fn cmp)
+{
+	struct skiplist *sk = xcalloc(1, sizeof(*sk));
+	sk->element_size = element_size;
+	sk->len = 0;
+	sk->level = 1;
+	sk->cmp = cmp;
+	sk->head = node_new(element_size, MAX_LEVEL);
+	sk->seed = 0xdeadbeef & 0x7fffffffu;
+	return sk;
 }
 
-skiplist *skiplistNewWithCustomAlloc(size_t element_size, skiplistCmpFn cmp, skiplistCallocFn calloc, skiplistFreeFn free) {
-    xcalloc = calloc;
-    xfree = free;
-    return skiplistNew(element_size, cmp);
+struct skiplist *skiplist_new_with_custom_alloc(
+	size_t element_size,
+	skiplist_cmp_fn cmp,
+	skiplist_calloc_fn calloc,
+	skiplist_free_fn free)
+{
+	xcalloc = calloc;
+	xfree = free;
+	return skiplist_new(element_size, cmp);
 }
 
-skiplist *skiplistNewWithArena(size_t element_size, skiplistCmpFn cmp) {
-    return skiplistNew(element_size, cmp);
+void skiplist_free(struct skiplist *sk)
+{
+	struct skiplist_node *x = sk->head;
+	while (x) {
+		struct skiplist_node *t = node_forwards(x)[0];
+		node_drop(sk, x);
+		x = t;
+	}
+	xfree(sk);
 }
 
-void skiplistDrop(skiplist *sk) {
-    skiplistNode *x = sk->head;
-    while (x) {
-        skiplistNode *t = nodeForwards(x)[0];
-        nodeDrop(sk, x);
-        x = t;
-    }
-    xfree(sk);
+static uint32_t rand_next(struct skiplist *sk)
+{
+	const uint32_t M = INT32_MAX;
+	const uint64_t A = 16807; // bits 14, 8, 7, 5, 2, 1, 0
+	uint64_t product = sk->seed * A;
+	sk->seed = (uint32_t)((product >> 31) + (product & M));
+	if (sk->seed > M) sk->seed -= M;
+	return sk->seed;
 }
 
-static uint32_t randNext(skiplist *sk) {
-    const uint32_t M = INT32_MAX;
-    const uint64_t A = 16807; // bits 14, 8, 7, 5, 2, 1, 0
-    uint64_t product = sk->seed * A;
-    sk->seed = (uint32_t)((product >> 31) + (product & M));
-    if (sk->seed > M) sk->seed -= M;
-    return sk->seed;
+static int rand_level(struct skiplist *sk)
+{
+	int level = 1;
+	const int branching = 2;
+	while (level < MAX_LEVEL && (rand_next(sk) % branching) == 0)
+		level++;
+
+	assert(level > 0);
+	assert(level <= MAX_LEVEL);
+
+	return level;
 }
 
-static int randLevel(skiplist *sk) {
-    int level = 1;
-    const int branching = 2;
-    while (level < MAX_LEVEL && (randNext(sk) % branching) == 0)
-        level++;
-
-    assert(level > 0);
-    assert(level <= MAX_LEVEL);
-
-    return level;
+static int cmp_element(const struct skiplist *sk, const struct skiplist_node *node, void *element)
+{
+	return sk->cmp(node_element_ptr(node), element);
 }
 
-static int cmpElement(const skiplist *sk, const skiplistNode *node, void *element) {
-    return sk->cmp(nodeElementPtr(node), element);
+static int find_gt_or_eq(
+	const struct skiplist *sk,
+	void *element,
+	struct skiplist_node *update[static MAX_LEVEL],
+	struct skiplist_node **node_out)
+{
+	struct skiplist_node *x = sk->head;
+	int cmp_result = 1;
+
+	for (int i = sk->level - 1; i >= 0; i--) {
+		while (node_forwards(x)[i] != NULL) {
+			int r = cmp_element(sk, node_forwards(x)[i], element);
+			if (r < 0) {
+				x = node_forwards(x)[i];
+				continue;
+			}
+			if (r == 0) cmp_result = r;
+			break;
+		}
+		update[i] = x;
+	}
+
+	*node_out = node_forwards(x)[0];
+
+	return cmp_result;
 }
 
-typedef enum {
-    cmpResultEq = 0,
-    cmpResultGt = 1,
-} cmpResult;
+void skiplist_insert(struct skiplist *sk, void *element)
+{
+	struct skiplist_node *update[MAX_LEVEL] = { NULL };
+	struct skiplist_node *x = NULL;
+	
+	int cmp_result = find_gt_or_eq(sk, element, update, &x);
+	if (x != NULL && cmp_result == 0) {
+		node_init_element(sk, x, element);
+		return;
+	}
 
-static cmpResult findGtOrEq(const skiplist *sk, void *element, skiplistNode *update[static MAX_LEVEL], skiplistNode **node_out) {
-    skiplistNode *x = sk->head;
-    cmpResult cmp_result = cmpResultGt;
+	int level = rand_level(sk);
+	if (level > sk->level) {
+		for (int i = sk->level; i < level; i++)
+			update[i] = sk->head;
+		sk->level = level;
+	}
 
-    for (int i = sk->level - 1; i >= 0; i--) {
-        while (nodeForwards(x)[i] != NULL) {
-            int r = cmpElement(sk, nodeForwards(x)[i], element);
-            if (r < 0) {
-                x = nodeForwards(x)[i];
-                continue;
-            }
-            if (r == 0) cmp_result = cmpResultEq;
-            break;
-        }
-        update[i] = x;
-    }
+	x = node_new(sk->element_size, level);
+	node_init_element(sk, x, element);
 
-    *node_out = nodeForwards(x)[0];
+	for (int i = 0; i < level; i++) {
+		node_forwards(x)[i] = node_forwards(update[i])[i];
+		node_forwards(update[i])[i] = x;
+	}
 
-    return cmp_result;
+	sk->len++;
 }
 
-void skiplistInsert(skiplist *sk, void *element) {
-    skiplistNode *update[MAX_LEVEL] = { NULL };
-    skiplistNode *x = NULL;
-    cmpResult cmp_result = findGtOrEq(sk, element, update, &x);
+void *skiplist_get(struct skiplist *sk, void *element)
+{
+	struct skiplist_node *update[MAX_LEVEL] = { NULL };
+	struct skiplist_node *x = NULL;
+	
+	int cmp_result = find_gt_or_eq(sk, element, update, &x);
+	if (x != NULL && cmp_result == 0)
+		return node_element_ptr(x);
 
-    if (x != NULL && cmp_result == cmpResultEq) {
-        nodeInitElement(sk, x, element);
-        return;
-    }
-
-    int level = randLevel(sk);
-    if (level > sk->level) {
-        for (int i = sk->level; i < level; i++)
-            update[i] = sk->head;
-        sk->level = level;
-    }
-
-    x = nodeNew(sk->element_size, level);
-    nodeInitElement(sk, x, element);
-
-    for (int i = 0; i < level; i++) {
-        nodeForwards(x)[i] = nodeForwards(update[i])[i];
-        nodeForwards(update[i])[i] = x;
-    }
-
-    sk->len++;
+	return NULL;
 }
 
-void *skiplistGet(skiplist *sk, void *element) {
-    skiplistNode *update[MAX_LEVEL] = { NULL };
-    skiplistNode *x = NULL;
-    cmpResult cmp_result = findGtOrEq(sk, element, update, &x);
-
-    if (x != NULL && cmp_result == cmpResultEq) {
-        return nodeElementPtr(x);
-    }
-
-    return NULL;
+void skiplist_del(struct skiplist *sk, void *element)
+{
+	struct skiplist_node *update[MAX_LEVEL] = { NULL };
+	struct skiplist_node *x = NULL;
+	
+	int cmp_result = find_gt_or_eq(sk, element, update, &x);
+	if (x != NULL && cmp_result == 0) {
+		for (int i = 0; i < sk->level; i++) {
+			if (node_forwards(update[i])[i] != x) break;
+			node_forwards(update[i])[i] = node_forwards(x)[i];
+		}
+		node_drop(sk, x);
+		while (sk->level > 0 && node_forwards(sk->head)[sk->level] == NULL)
+			sk->level--;
+		sk->len--;
+	}
 }
 
-void skiplistDel(skiplist *sk, void *element) {
-    skiplistNode *update[MAX_LEVEL] = { NULL };
-    skiplistNode *x = NULL;
-    cmpResult cmp_result = findGtOrEq(sk, element, update, &x);
-
-    if (x != NULL && cmp_result == cmpResultEq) {
-        for (int i = 0; i < sk->level; i++) {
-            if (nodeForwards(update[i])[i] != x)
-                break;
-            nodeForwards(update[i])[i] = nodeForwards(x)[i];
-        }
-        nodeDrop(sk, x);
-        while (sk->level > 0 && nodeForwards(sk->head)[sk->level] == NULL)
-            sk->level--;
-        sk->len--;
-    }
+size_t skiplist_len(struct skiplist *sk)
+{
+	return sk->len;
 }
 
-size_t skiplistLen(skiplist *sk) {
-    return sk->len;
+void skiplist_iter_init(struct skiplist_iter *it, const struct skiplist *sk)
+{
+	it->sk = sk;
+	it->next = node_forwards(it->sk->head)[0];
+	it->element_size = sk->element_size;
 }
 
-void skiplistIterInit(skiplistIter *it, const skiplist *sk) {
-    it->sk = sk;
-    it->next = nodeForwards(it->sk->head)[0];
-    it->element_size = sk->element_size;
-}
-
-bool skiplistIterNext(skiplistIter *it, void **item) {
-    if (!it->next) return false;
-    *item = nodeElementPtr(it->next);
-    it->next = nodeForwards(it->next)[0];
-    return true;
+bool skiplist_iter_next(struct skiplist_iter *it, void **item)
+{
+	if (!it->next) return false;
+	*item = node_element_ptr(it->next);
+	it->next = node_forwards(it->next)[0];
+	return true;
 }
 
 #ifdef SKIPLIST_TEST
 
-typedef struct {
-    int key;
-    int val;
-} pair;
+struct pair {
+	int key;
+	int val;
+};
 
-static int pairCmp(const void *a, const void *b) {
-    const pair *pa = a;
-    const pair *pb = b;
-    return pa->key - pb->key;
+static int pair_cmp(const void *a, const void *b)
+{
+	const struct pair *pa = a;
+	const struct pair *pb = b;
+	return pa->key - pb->key;
 }
 
-int main(int argc, char **argv) {
-    struct skiplist *sk = skiplistNew(sizeof(pair), &pairCmp);
-    assert(skiplistLen(sk) == 0);
-    for (int i = 0; i < 10; i++) {
-        skiplistInsert(sk, &(pair){.key = i, .val = i});
-    }
-    assert(skiplistLen(sk) == 10);
+int main(int argc, char **argv)
+{
+	struct skiplist *sk = skiplist_new(sizeof(struct pair), &pair_cmp);
+	assert(skiplist_len(sk) == 0);
+	for (int i = 0; i < 10; i++) {
+		skiplist_insert(sk, &(struct pair){.key = i, .val = i});
+	}
+	assert(skiplist_len(sk) == 10);
 
-    for (int i = 0; i < 10; i++) {
-        pair *item = skiplistGet(sk, &(pair){.key = i});
-        assert(item != NULL);
-        assert(item->key == i);
-        assert(item->val == i);
-    }
+	for (int i = 0; i < 10; i++) {
+		struct pair *item = skiplist_get(sk, &(struct pair){.key = i});
+		assert(item != NULL);
+		assert(item->key == i);
+		assert(item->val == i);
+	}
 
-    skiplistIter it;
-    skiplistIterInit(&it, sk);
-    pair *item = NULL;
-    for (int i = 0; skiplistIterNext(&it, (void**)&item); i++) {
-        assert(item->key == i);
-        assert(item->val == i);
-    }
+	struct skiplist_iter it;
+	skiplist_iter_init(&it, sk);
+	struct pair *item = NULL;
+	for (int i = 0; skiplist_iter_next(&it, (void**)&item); i++) {
+		assert(item->key == i);
+		assert(item->val == i);
+	}
 
-    for (int i = 0; i < 10; i++) {
-        skiplistInsert(sk, &(pair){.key = i, .val = i+1});
-    }
-    assert(skiplistLen(sk) == 10);
+	for (int i = 0; i < 10; i++) {
+		skiplist_insert(sk, &(struct pair){.key = i, .val = i+1});
+	}
+	assert(skiplist_len(sk) == 10);
 
-    for (int i = 0; i < 10; i++) {
-        pair *item = skiplistGet(sk, &(pair){.key = i});
-        assert(item != NULL);
-        assert(item->key == i);
-        assert(item->val == i+1);
-    }
+	for (int i = 0; i < 10; i++) {
+		struct pair *item = skiplist_get(sk, &(struct pair){.key = i});
+		assert(item != NULL);
+		assert(item->key == i);
+		assert(item->val == i+1);
+	}
 
-    skiplistDel(sk, &(pair){.key = 0});
-    item = skiplistGet(sk, &(pair){.key = 0});
-    assert(item == NULL);
-    assert(skiplistLen(sk) == 9);
+	skiplist_del(sk, &(struct pair){.key = 0});
+	item = skiplist_get(sk, &(struct pair){.key = 0});
+	assert(item == NULL);
+	assert(skiplist_len(sk) == 9);
 
-    skiplistDel(sk, &(pair){.key = 9});
-    item = skiplistGet(sk, &(pair){.key = 9});
-    assert(item == NULL);
-    assert(skiplistLen(sk) == 8);
+	skiplist_del(sk, &(struct pair){.key = 9});
+	item = skiplist_get(sk, &(struct pair){.key = 9});
+	assert(item == NULL);
+	assert(skiplist_len(sk) == 8);
 
-    skiplistDel(sk, &(pair){.key = 9});
-    item = skiplistGet(sk, &(pair){.key = 9});
-    assert(item == NULL);
-    assert(skiplistLen(sk) == 8);
+	skiplist_del(sk, &(struct pair){.key = 9});
+	item = skiplist_get(sk, &(struct pair){.key = 9});
+	assert(item == NULL);
+	assert(skiplist_len(sk) == 8);
 
-    for (int i = 1; i < 9; i++) {
-        pair *item = skiplistGet(sk, &(pair){.key = i});
-        assert(item != NULL);
-        assert(item->key == i);
-    }
+	for (int i = 1; i < 9; i++) {
+		struct pair *item = skiplist_get(sk, &(struct pair){.key = i});
+		assert(item != NULL);
+		assert(item->key == i);
+	}
 
-    skiplistDel(sk, &(pair){.key = 5});
-    item = skiplistGet(sk, &(pair){.key = 5});
-    assert(item == NULL);
-    assert(skiplistLen(sk) == 7);
+	skiplist_del(sk, &(struct pair){.key = 5});
+	item = skiplist_get(sk, &(struct pair){.key = 5});
+	assert(item == NULL);
+	assert(skiplist_len(sk) == 7);
 
-    skiplistDrop(sk);
-    return 0;
+	skiplist_free(sk);
+	return 0;
 }
 
 #endif
@@ -282,129 +298,129 @@ int main(int argc, char **argv) {
 #include <time.h>
 #include <stdio.h>
 
-typedef struct {
-    int64_t key;
-    int64_t val;
-} pair;
+struct pair {
+	int64_t key;
+	int64_t val;
+};
 
-static int pairCmp(const void *a, const void *b) {
-    const pair *pa = a;
-    const pair *pb = b;
-    return pa->key - pb->key;
+static int pair_cmp(const void *a, const void *b)
+{
+	const struct pair *pa = a;
+	const struct pair *pb = b;
+	return pa->key - pb->key;
 }
 
-int main(int argc, char **argv) {
-    const int N = 1000000;
-    {
-        skiplist *sk = skiplistNew(sizeof(pair), &pairCmp);
-        
-        {
-            clock_t begin = clock();
-            for (int i = 0; i < N; i++) {
-                skiplistInsert(sk, &(pair){.key = i, .val = i});
-            }
-            clock_t end = clock();
-            double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
-            double ns_op = elapsed_secs/(double)N*1e9;
-            printf("skiplistSeqInsert:    %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
-                N, elapsed_secs, ns_op, (double)N / elapsed_secs);
-        }
+int main(int argc, char **argv)
+{
+	const int N = 1000000;
+	{
+		struct skiplist *sk = skiplist_new(sizeof(struct pair), &pair_cmp);
+		
+		{
+			clock_t begin = clock();
+			for (int i = 0; i < N; i++) {
+				skiplist_insert(sk, &(struct pair){.key = i, .val = i});
+			}
+			clock_t end = clock();
+			double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
+			double ns_op = elapsed_secs/(double)N*1e9;
+			printf("skiplist_seq_insert:     %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
+				N, elapsed_secs, ns_op, (double)N / elapsed_secs);
+		}
 
-        {
-            clock_t begin = clock();
-            for (int i = 0; i < N; i++) {
-                pair *item = skiplistGet(sk, &(pair){.key = i});
-            }
-            clock_t end = clock();
-            double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
-            double ns_op = elapsed_secs/(double)N*1e9;
-            printf("skiplistSeqGet:       %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
-                N, elapsed_secs, ns_op, (double)N / elapsed_secs);
-        }
+		{
+			clock_t begin = clock();
+			for (int i = 0; i < N; i++) {
+				struct pair *item = skiplist_get(sk, &(struct pair){.key = i});
+			}
+			clock_t end = clock();
+			double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
+			double ns_op = elapsed_secs/(double)N*1e9;
+			printf("skiplist_seq_get:        %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
+				N, elapsed_secs, ns_op, (double)N / elapsed_secs);
+		}
 
-        skiplistDrop(sk);
-    }
+		skiplist_free(sk);
+	}
 
-    {
-        skiplist *sk = skiplistNew(sizeof(pair), &pairCmp);
-        
-        int *rand_numbers = malloc(N * sizeof(int));
-        for (int i = 0; i < N; i++)
-            rand_numbers[i] = random() % N;
+	{
+		struct skiplist *sk = skiplist_new(sizeof(struct pair), &pair_cmp);
+		
+		int *rand_numbers = malloc(N * sizeof(int));
+		for (int i = 0; i < N; i++)
+			rand_numbers[i] = random() % N;
 
-        {
-            clock_t begin = clock();
-            for (int i = 0; i < N; i++) {
-                int k = rand_numbers[i];
-                skiplistInsert(sk, &(pair){.key = k, .val = k});
-            }
-            clock_t end = clock();
-            double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
-            double ns_op = elapsed_secs/(double)N*1e9;
-            printf("skiplistRndInsert:    %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
-                N, elapsed_secs, ns_op, (double)N / elapsed_secs);
-        }
+		{
+			clock_t begin = clock();
+			for (int i = 0; i < N; i++) {
+				int k = rand_numbers[i];
+				skiplist_insert(sk, &(struct pair){.key = k, .val = k});
+			}
+			clock_t end = clock();
+			double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
+			double ns_op = elapsed_secs/(double)N*1e9;
+			printf("skiplist_rnd_insert:     %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
+				N, elapsed_secs, ns_op, (double)N / elapsed_secs);
+		}
 
-        {
-            clock_t begin = clock();
-            for (int i = 0; i < N; i++) {
-                int k = rand_numbers[i];
-                pair *item = skiplistGet(sk, &(pair){.key = k});
-            }
-            clock_t end = clock();
-            double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
-            double ns_op = elapsed_secs/(double)N*1e9;
-            printf("skiplistRndGet:       %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
-                N, elapsed_secs, ns_op, (double)N / elapsed_secs);
-        }
+		{
+			clock_t begin = clock();
+			for (int i = 0; i < N; i++) {
+				int k = rand_numbers[i];
+				struct pair *item = skiplist_get(sk, &(struct pair){.key = k});
+			}
+			clock_t end = clock();
+			double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
+			double ns_op = elapsed_secs/(double)N*1e9;
+			printf("skiplist_rnd_get:        %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
+				N, elapsed_secs, ns_op, (double)N / elapsed_secs);
+		}
 
-        free(rand_numbers);
-        skiplistDrop(sk);
-    }
+		free(rand_numbers);
+		skiplist_free(sk);
+	}
 
-    {
-        skiplist *sk = skiplistNew(sizeof(pair), &pairCmp);
+	{
+		struct skiplist *sk = skiplist_new(sizeof(struct pair), &pair_cmp);
 
-        clock_t begin = clock();
-        for (int i = 0; i < N; i++) {
-            skiplistInsert(sk, &(pair){.key = i, .val = i});
-            pair *item = skiplistGet(sk, &(pair){.key = i});
-        }
-        clock_t end = clock();
-        double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
-        double ns_op = elapsed_secs/(double)N*1e9;
-        printf("skiplistInsertAndGet: %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
-            N, elapsed_secs, ns_op, (double)N / elapsed_secs);
+		clock_t begin = clock();
+		for (int i = 0; i < N; i++) {
+			skiplist_insert(sk, &(struct pair){.key = i, .val = i});
+			struct pair *item = skiplist_get(sk, &(struct pair){.key = i});
+		}
+		clock_t end = clock();
+		double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
+		double ns_op = elapsed_secs/(double)N*1e9;
+		printf("skiplist_insert_and_get: %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
+			N, elapsed_secs, ns_op, (double)N / elapsed_secs);
 
-        skiplistDrop(sk);
-    }
+		skiplist_free(sk);
+	}
 
-    {
-        skiplist *sk = skiplistNew(sizeof(pair), &pairCmp);
-        for (int i = 0; i < N; i++) {
-            skiplistInsert(sk, &(pair){.key = i, .val = i});
-        }
+	{
+		struct skiplist *sk = skiplist_new(sizeof(struct pair), &pair_cmp);
+		for (int i = 0; i < N; i++) {
+			skiplist_insert(sk, &(struct pair){.key = i, .val = i});
+		}
 
-        clock_t begin = clock();
-        skiplistIter it;
-        skiplistIterInit(&it, sk);
-        pair *item = NULL;
-        for (int i = 0; skiplistIterNext(&it, (void**)&item); i++) {
-            assert(item->key == i);
-            assert(item->val == i);
-        }
-        clock_t end = clock();
-        double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
-        double ns_op = elapsed_secs/(double)N*1e9;
-        printf("skiplistIterNext:     %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
-            N, elapsed_secs, ns_op, (double)N / elapsed_secs);
+		clock_t begin = clock();
+		struct skiplist_iter it;
+		skiplist_iter_init(&it, sk);
+		struct pair *item = NULL;
+		for (int i = 0; skiplist_iter_next(&it, (void**)&item); i++) {
+			assert(item->key == i);
+			assert(item->val == i);
+		}
+		clock_t end = clock();
+		double elapsed_secs = (double)(end - begin) / CLOCKS_PER_SEC;
+		double ns_op = elapsed_secs/(double)N*1e9;
+		printf("skiplist_iter_next:      %d ops in %.3f secs, %.0f ns/op, %.0f op/sec\n",
+			N, elapsed_secs, ns_op, (double)N / elapsed_secs);
 
-        skiplistDrop(sk);
+		skiplist_free(sk);
+	}
 
-    }
-    
-
-    return 0;
+	return 0;
 }
 
 #endif
